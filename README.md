@@ -31,6 +31,9 @@ GitHub Actions (매월 28~31일 cron)
 - GitHub cron은 "매월 말일"을 직접 지원하지 않으므로, **28·29·30·31일에 매일 실행**하되
   코드에서 **실제 말일일 때만** 동작합니다. (2월·평년·윤년·연말 모두 정확히 처리)
 - 워크플로는 `TZ=Asia/Seoul` 로 실행되어 모든 날짜 판단이 **한국 시간** 기준입니다.
+- Gemini 호출은 일시적 **과부하(503 등)에 지수 백오프로 최대 5회 재시도**하고,
+  그래도 실패하면 **대체 모델로 자동 폴백**해 월간 작업이 죽지 않습니다.
+  (기본 `gemini-3.5-flash` → 폴백 `gemini-3.1-flash-lite`)
 
 ---
 
@@ -43,14 +46,15 @@ calendar_to_task/
 │   ├── index.js          # 전체 흐름 (말일 체크 → 조회 → AI → 등록)
 │   ├── auth.js           # OAuth2 클라이언트 (refresh token)
 │   ├── calendar.js       # 다음 달 일정 조회
-│   ├── gemini.js         # 일정 → 준비 작업 변환
+│   ├── gemini.js         # 일정 → 준비 작업 변환 (재시도 + 모델 폴백)
 │   ├── tasks.js          # Google Tasks 등록 + 중복 방지
 │   ├── dateUtils.js      # 말일 판정 / 다음 달 범위 계산
 │   └── loadEnv.js        # 로컬 .env 로더 (CI에선 무시)
 ├── scripts/
 │   └── get-refresh-token.js   # refresh token 발급 (최초 1회 로컬 실행)
 ├── .env.example
-└── package.json
+├── package.json
+└── package-lock.json     # 의존성 고정 (CI의 npm ci 에 필요)
 ```
 
 ---
@@ -81,21 +85,33 @@ calendar_to_task/
 
 ### 4단계. Refresh Token 발급 (로컬 1회)
 
+> **사전 요구사항**: Node.js **20 이상** (`node -v` 로 확인).
+
 ```bash
 # 1) 의존성 설치
 npm install
 
 # 2) .env 파일 생성 후 CLIENT_ID / CLIENT_SECRET 입력
-cp .env.example .env
+cp .env.example .env        # Windows PowerShell: copy .env.example .env
 #   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET 두 값만 먼저 채우면 됩니다.
 
 # 3) refresh token 발급 스크립트 실행
 npm run auth
 ```
 
-- 출력된 URL을 브라우저에서 열어 로그인 → 권한 허용
-- 화면에 표시된 **인증 코드**를 터미널에 붙여넣으면 **refresh token** 이 출력됩니다.
-- 이 토큰을 `.env` 의 `GOOGLE_REFRESH_TOKEN`(로컬 테스트용)과
+진행 순서:
+
+1. 출력된 **URL을 브라우저에서 열어** 로그인 → Calendar/Tasks 권한 허용
+2. 화면에 **인증 코드(`4/…` 로 시작)** 가 표시됩니다. 이 코드를 복사해
+   **터미널에 붙여넣고 Enter** 를 누릅니다.
+3. 그러면 스크립트가 코드를 교환해 **refresh token(`1//…` 로 시작)** 을 출력합니다.
+   이 **마지막 출력값**을 사용하세요.
+
+> ⚠️ **가장 흔한 실수**: 2단계의 **인증 코드(`4/…`)** 를 그대로 토큰 자리에 넣는 것.
+> 인증 코드는 **1회용·수 분 내 만료**라 그대로 쓰면 `invalid_grant` 오류가 납니다.
+> 반드시 3단계에서 출력된 **`1//…` 값(refresh token)** 을 등록해야 합니다.
+
+- 발급된 refresh token(`1//…`)을 `.env` 의 `GOOGLE_REFRESH_TOKEN`(로컬 테스트용)과
   GitHub Secret(아래 5단계)에 등록합니다.
 
 ### 5단계. GitHub Secrets 등록
@@ -135,7 +151,11 @@ FORCE_RUN=true npm start
 > ```
 
 실행하면 다음 달 일정이 조회되고, 준비 작업이 Google Tasks에 등록됩니다.
-같은 명령을 다시 실행하면 동일 제목은 **중복으로 건너뜀** 처리됩니다.
+같은 명령을 다시 실행하면 **제목이 정확히 같은** 작업은 **중복으로 건너뜀** 처리됩니다.
+
+> 참고: AI는 매 호출마다 표현을 조금씩 다르게 생성할 수 있어, 강제 재실행을
+> 반복하면 유사한(제목이 미묘하게 다른) 작업이 누적될 수 있습니다. 실제 운영은
+> 매월 **다른 달**을 대상으로 1회만 돌기 때문에 문제가 되지 않습니다.
 
 ---
 
@@ -146,10 +166,15 @@ FORCE_RUN=true npm start
 | `TASK_LIST_TITLE` | 등록할 Task 목록 이름. 없으면 만들고, 있으면 재사용 | 기본 목록(`@default`) |
 | `FORCE_RUN` | `true` 면 말일 체크를 건너뜀 | (미설정) |
 
+> 참고: 워크플로(`monthly-sync.yml`)에는 `TASK_LIST_TITLE` 이 이미
+> `캘린더 준비 작업` 으로 설정되어 있습니다. 다른 목록을 쓰려면 이 값을 바꾸세요.
+
 - **대상 캘린더**: 기본은 `primary`(기본 캘린더)입니다. 다른 캘린더를 쓰려면
   `src/calendar.js` 의 `calendarId` 를 해당 캘린더 ID로 바꾸세요.
-- **AI 모델/프롬프트**: `src/gemini.js` 의 `MODEL` 과 프롬프트 문구를 수정하면
-  준비 작업의 스타일과 개수를 조절할 수 있습니다.
+- **AI 모델/프롬프트**: `src/gemini.js` 의 `MODELS` 배열과 프롬프트 문구를 수정하면
+  준비 작업의 스타일과 개수를 조절할 수 있습니다. `MODELS` 는 **우선순위 순서**로,
+  앞 모델이 과부하로 실패하면 다음 모델로 폴백합니다.
+  (기본: `['gemini-3.5-flash', 'gemini-3.1-flash-lite']`)
 
 ---
 
@@ -158,8 +183,14 @@ FORCE_RUN=true npm start
 - **refresh token이 안 나와요**: Google 계정 →
   [앱 액세스 권한 관리](https://myaccount.google.com/permissions) 에서 기존 권한을 제거한 뒤
   `npm run auth` 를 다시 실행하세요. (스크립트는 `prompt=consent` 로 매번 재발급을 시도합니다.)
-- **`invalid_grant` 오류**: refresh token이 만료/폐기되었을 수 있습니다.
-  OAuth 동의 화면이 "테스트" 상태면 토큰 유효기간이 7일로 짧을 수 있으니,
-  필요 시 동의 화면을 **게시(프로덕션)** 상태로 전환하세요.
+- **`invalid_grant` 오류**: 다음 중 하나입니다.
+  1. **인증 코드(`4/…`)를 refresh token 자리에 넣은 경우** — 가장 흔합니다.
+     4단계를 다시 읽고 스크립트가 출력한 **`1//…` 값**을 등록하세요.
+  2. refresh token이 만료/폐기된 경우 — OAuth 동의 화면이 "테스트" 상태면
+     토큰 유효기간이 7일로 짧을 수 있으니, 필요 시 동의 화면을
+     **게시(프로덕션)** 상태로 전환하세요.
+- **`503 UNAVAILABLE` / "high demand"**: Gemini 모델의 일시적 과부하입니다.
+  코드가 자동으로 재시도 후 대체 모델로 폴백하므로 대개 그대로 두면 됩니다.
+  계속된다면 잠시 후 다시 실행하세요.
 - **일정은 있는데 작업이 0건**: 단순/개인 일정은 준비 작업이 생략될 수 있습니다.
   `src/gemini.js` 의 프롬프트 규칙을 조정하세요.
