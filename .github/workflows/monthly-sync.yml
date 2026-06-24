@@ -26,11 +26,11 @@ jobs:
       # 수동 실행 시에만 force 입력값을 전달. 스케줄 실행 시엔 비어 있음.
       FORCE_RUN: ${{ github.event.inputs.force }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
