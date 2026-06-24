@@ -21,6 +21,8 @@ jobs:
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # 등록 대상 Task 목록 이름(민감정보 아님). 로컬 .env 와 일치시킨다.
+      TASK_LIST_TITLE: 캘린더 준비 작업
       # 수동 실행 시에만 force 입력값을 전달. 스케줄 실행 시엔 비어 있음.
       FORCE_RUN: ${{ github.event.inputs.force }}
     steps:
