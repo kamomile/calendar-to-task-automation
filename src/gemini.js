@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
-const MODEL = 'gemini-2.5-flash';
+// 우선순위 순서의 모델 목록. 앞 모델이 과부하(503 등)로 재시도까지 실패하면
+// 다음 모델로 자동 폴백한다. 기본은 품질 좋은 GA 모델, 폴백은 가용성 높은 Lite.
+const MODELS = ['gemini-3.5-flash', 'gemini-3.1-flash-lite'];
 
 /**
  * 생성될 준비 작업의 구조화 출력 스키마.
@@ -44,17 +46,7 @@ export async function generatePrepTasks(events, monthLabel) {
 
   const prompt = buildPrompt(events, monthLabel);
 
-  const res = await withRetry(() =>
-    ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0.4,
-      },
-    }),
-  );
+  const res = await generateWithFallback(ai, prompt);
 
   const text = res.text;
   if (!text) return [];
@@ -70,7 +62,46 @@ export async function generatePrepTasks(events, monthLabel) {
 }
 
 /**
- * 일시적 오류(503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 500)에 대해
+ * MODELS 목록을 순서대로 시도한다. 앞 모델이 과부하성 오류로 재시도까지
+ * 모두 실패하면 다음 모델로 폴백한다. 과부하가 아닌 오류는 즉시 던진다.
+ *
+ * @param {import('@google/genai').GoogleGenAI} ai
+ * @param {string} prompt
+ */
+async function generateWithFallback(ai, prompt) {
+  const config = {
+    responseMimeType: 'application/json',
+    responseSchema: RESPONSE_SCHEMA,
+    temperature: 0.4,
+  };
+
+  let lastErr;
+  for (let i = 0; i < MODELS.length; i++) {
+    const model = MODELS[i];
+    try {
+      const res = await withRetry(() =>
+        ai.models.generateContent({ model, contents: prompt, config }),
+      );
+      if (i > 0) console.log(`대체 모델로 생성 성공: ${model}`);
+      return res;
+    } catch (err) {
+      lastErr = err;
+      const hasNext = i < MODELS.length - 1;
+      // 과부하성 오류이고 다음 후보가 있으면 폴백, 아니면 던진다.
+      if (hasNext && isOverloadError(err)) {
+        console.log(
+          `모델 ${model} 과부하 지속 → 대체 모델(${MODELS[i + 1]})로 전환`,
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * 일시적 과부하/한도 오류(503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 500)에 대해
  * 지수 백오프로 재시도한다. 그 외 오류는 즉시 던진다.
  *
  * @param {() => Promise<any>} fn
@@ -83,25 +114,31 @@ async function withRetry(fn, maxAttempts = 5) {
       return await fn();
     } catch (err) {
       lastErr = err;
-      const status = err?.status ?? err?.code;
-      const retryable =
-        status === 503 ||
-        status === 429 ||
-        status === 500 ||
-        /UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded/i.test(
-          err?.message ?? '',
-        );
-      if (!retryable || attempt === maxAttempts) throw err;
+      if (!isOverloadError(err) || attempt === maxAttempts) throw err;
 
       // 1s, 2s, 4s, 8s ... + 지터
       const delay = 1000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 500);
+      const status = err?.status ?? err?.code ?? 'unknown';
       console.log(
-        `Gemini 일시 오류(${status ?? 'unknown'}). ${delay}ms 후 재시도 (${attempt}/${maxAttempts - 1})...`,
+        `Gemini 일시 오류(${status}). ${delay}ms 후 재시도 (${attempt}/${maxAttempts - 1})...`,
       );
       await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr;
+}
+
+/** 재시도/폴백 대상이 되는 일시적 과부하·한도 오류인지 판정한다. */
+function isOverloadError(err) {
+  const status = err?.status ?? err?.code;
+  return (
+    status === 503 ||
+    status === 429 ||
+    status === 500 ||
+    /UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded/i.test(
+      err?.message ?? '',
+    )
+  );
 }
 
 function buildPrompt(events, monthLabel) {
