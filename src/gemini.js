@@ -44,15 +44,17 @@ export async function generatePrepTasks(events, monthLabel) {
 
   const prompt = buildPrompt(events, monthLabel);
 
-  const res = await ai.models.generateContent({
-    model: MODEL,
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0.4,
-    },
-  });
+  const res = await withRetry(() =>
+    ai.models.generateContent({
+      model: MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: RESPONSE_SCHEMA,
+        temperature: 0.4,
+      },
+    }),
+  );
 
   const text = res.text;
   if (!text) return [];
@@ -65,6 +67,41 @@ export async function generatePrepTasks(events, monthLabel) {
   }
 
   return Array.isArray(parsed) ? parsed : [];
+}
+
+/**
+ * 일시적 오류(503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 500)에 대해
+ * 지수 백오프로 재시도한다. 그 외 오류는 즉시 던진다.
+ *
+ * @param {() => Promise<any>} fn
+ * @param {number} [maxAttempts=5]
+ */
+async function withRetry(fn, maxAttempts = 5) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err?.status ?? err?.code;
+      const retryable =
+        status === 503 ||
+        status === 429 ||
+        status === 500 ||
+        /UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded/i.test(
+          err?.message ?? '',
+        );
+      if (!retryable || attempt === maxAttempts) throw err;
+
+      // 1s, 2s, 4s, 8s ... + 지터
+      const delay = 1000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 500);
+      console.log(
+        `Gemini 일시 오류(${status ?? 'unknown'}). ${delay}ms 후 재시도 (${attempt}/${maxAttempts - 1})...`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
 }
 
 function buildPrompt(events, monthLabel) {
