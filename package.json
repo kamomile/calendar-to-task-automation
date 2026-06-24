@@ -1,0 +1,17 @@
+{
+  "name": "calendar-to-task",
+  "version": "1.0.0",
+  "description": "매월 말일에 Google Calendar의 다음 달 일정을 Gemini로 분석해 준비 작업으로 만들어 Google Tasks에 등록하는 자동화",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "auth": "node scripts/get-refresh-token.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "googleapis": "^144.0.0"
+  }
+}

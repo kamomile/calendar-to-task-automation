@@ -1,0 +1,37 @@
+name: Monthly Calendar to Tasks
+
+on:
+  schedule:
+    # UTC 00:00 = KST 09:00. 매월 28·29·30·31일 실행하고,
+    # 실제 말일 여부는 코드(isLastDayOfMonth, TZ=Asia/Seoul)에서 판정한다.
+    - cron: '0 0 28-31 * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '말일 체크를 무시하고 강제 실행 (테스트용)'
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Seoul
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # 수동 실행 시에만 force 입력값을 전달. 스케줄 실행 시엔 비어 있음.
+      FORCE_RUN: ${{ github.event.inputs.force }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run sync
+        run: node src/index.js
